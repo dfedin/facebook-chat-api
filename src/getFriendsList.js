@@ -11,8 +11,7 @@ var GENDERS = {
   2: 'male_singular',
   3: 'female_singular_guess',
   4: 'male_singular_guess',
-  5: 'mixed_singular',
-  5: 'mixed_plural',
+  5: 'mixed',
   6: 'neuter_singular',
   7: 'unknown_singular',
   8: 'female_plural',
@@ -35,6 +34,7 @@ function formatData(obj) {
       type: user.type,
       profileUrl: user.uri,
       vanity: user.vanity,
+      isBirthday: !!user.is_birthday,
     }
   });
 }
@@ -47,7 +47,7 @@ module.exports = function(defaultFuncs, api, ctx) {
 
     defaultFuncs
       .postFormData("https://www.facebook.com/chat/user_info_all", ctx.jar, {}, {viewer: ctx.userID})
-      .then(utils.parseAndCheckLogin)
+      .then(utils.parseAndCheckLogin(ctx.jar, defaultFuncs))
       .then(function(resData) {
         if (!resData) {
           throw {error: "getFriendsList returned empty object."};
