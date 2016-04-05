@@ -42,8 +42,13 @@ module.exports = function(defaultFuncs, api, ctx) {
    */
   function handleMessagingEvents(event) {
     switch (event.event) {
+      // "read_receipt" event triggers when other people read the user's messages.
       case 'read_receipt':
         globalCallback(null, utils.formatReadReceipt(event));
+        return true;
+      // "read event" triggers when the user read other people's messages.
+      case 'read':
+        globalCallback(null, utils.formatRead(event));
         return true;
       default:
         return false;
@@ -143,66 +148,17 @@ module.exports = function(defaultFuncs, api, ctx) {
                 }
               });
               break;
-            case 'messaging':
-              if (ctx.globalOptions.listenEvents && handleMessagingEvents(v)) {
-                // globalCallback got called if handleMessagingEvents returned true
+            case 'delta':
+              if (v.delta.class !== "NewMessage" || ctx.globalOptions.pageID){
+                return;
+              }
+              var fmtMsg = utils.formatDeltaMessage(v);
+
+              if (!ctx.globalOptions.selfListen && fmtMsg.senderID === ctx.userID){
                 return;
               }
 
-              if(ctx.globalOptions.pageID ||
-                v.event !== "deliver" ||
-                (!ctx.globalOptions.selfListen && v.message.sender_fbid.toString() === ctx.userID)) {
-                return;
-              }
-
-
-              atLeastOne = true;
-              var message = utils.formatMessage(v);
-
-              // The participants array is caped at 5, we need to query more to
-              // get them.
-              if(message.participantIDs.length >= 5) {
-                // We simply make a get request to get the message page focused
-                // on a specific thread and parse the html returned
-                defaultFuncs.get("https://www.facebook.com/messages/search/conversation-" + message.threadID, ctx.jar)
-                  .then(function(res) {
-                    if (res.statusCode !== 200) {
-                      throw {error: "listen: couldn't get participantNames."};
-                    }
-                    // FB will send the first 20 thread information directly
-                    // merged inside the html. This is an attempt at retrieving
-                    // that information in only 2 (guaranteed) queries.
-                    // ---------- Very Hacky Part Starts -----------------
-                    // Add "]" at the end for the 2nd utils.getFrom
-                    // because this utils.getFrom will slurp the end token
-                    var almostParticipants = utils.getFrom(res.body, "\"thread_fbid\":\"" + message.threadID + "\",\"other_user_fbid\"", "]") + "]";
-                    var stringParticipants = utils.getFrom(almostParticipants, "[", "]");
-                    var participantIDs = stringParticipants.split(",").map(function(v) {
-                      return v.replace("fbid:", "").replace(/\"/g, "");
-                    });
-                    // ---------- Very Hacky Part Ends -----------------
-                    message.participantIDs = participantIDs;
-                    api.getUserInfo(participantIDs, function(err, firstThread) {
-                      if (err) {
-                        throw err;
-                      }
-
-                      message.participantsInfo = Object.keys(firstThread).map(function(key) {
-                        return firstThread[key];
-                      });
-                      // Rename this?
-                      message.participantNames = message.participantsInfo.map(function(v) {
-                        return v.name;
-                      });
-                      return globalCallback(null, message);
-                    });
-                  });
-                return;
-              }
-
-              if (ctx.loggedIn) {
-                return globalCallback(null, message);
-              }
+              return globalCallback(null, fmtMsg);
               break;
             case 'pages_messaging':
               if(!ctx.globalOptions.pageID ||
@@ -247,6 +203,7 @@ module.exports = function(defaultFuncs, api, ctx) {
       if (currentlyRunning) {
         currentlyRunning = setTimeout(listen, Math.random() * 200 + 50);
       }
+      return;
     })
     .catch(function(err) {
       if (err.code === 'ETIMEDOUT') {
