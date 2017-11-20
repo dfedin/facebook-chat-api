@@ -3,7 +3,9 @@
 var utils = require("./utils");
 var cheerio = require("cheerio");
 var log = require("npmlog");
-var fs = require("fs");
+
+var defaultLogRecordSize = 100;
+log.maxRecordSize = defaultLogRecordSize;
 
 function setOptions(globalOptions, options) {
   Object.keys(options).map(function(key) {
@@ -11,6 +13,10 @@ function setOptions(globalOptions, options) {
       case 'logLevel':
         log.level = options.logLevel;
         globalOptions.logLevel = options.logLevel;
+        break;
+      case 'logRecordSize':
+        log.maxRecordSize = options.logRecordSize;
+        globalOptions.logRecordSize = options.logRecordSize;
         break;
       case 'selfListen':
         globalOptions.selfListen = options.selfListen;
@@ -28,7 +34,7 @@ function setOptions(globalOptions, options) {
         globalOptions.forceLogin = options.forceLogin;
         break;
       default:
-        log.warn('Unrecognized option given to setOptions', key);
+        log.warn("setOptions", "Unrecognized option given to setOptions: " + key);
         break;
     }
   });
@@ -44,7 +50,7 @@ function buildAPI(globalOptions, html, jar) {
   }
 
   var userID = maybeCookie[0].cookieString().split("=")[1].toString();
-  log.info("Logged in");
+  log.info("login", "Logged in");
 
   var clientID = (Math.random() * 2147483648 | 0).toString(16);
 
@@ -55,7 +61,8 @@ function buildAPI(globalOptions, html, jar) {
     clientID: clientID,
     globalOptions: globalOptions,
     loggedIn: true,
-    access_token: 'NONE'
+    access_token: 'NONE',
+    clientMutationId: 0
   };
 
   var api = {
@@ -68,32 +75,44 @@ function buildAPI(globalOptions, html, jar) {
   var apiFuncNames = [
     'addUserToGroup',
     'changeArchivedStatus',
+    'changeBlockedStatus',
     'changeGroupImage',
     'changeThreadColor',
     'changeThreadEmoji',
     'changeNickname',
+    'createPoll',
     'deleteMessage',
     'deleteThread',
+    'forwardAttachment',
     'getCurrentUserID',
+    'getEmojiUrl',
     'getFriendsList',
     'getThreadHistory',
     'getThreadInfo',
     'getThreadList',
+    'getThreadPictures',
     'getUserID',
     'getUserInfo',
+    'threadColors',
     'handleMessageRequest',
     'listen',
     'logout',
     'markAsRead',
     'muteThread',
     'removeUserFromGroup',
+    'resolvePhotoUrl',
     'searchForThread',
     'sendMessage',
     'sendTypingIndicator',
+    'setMessageReaction',
     'setTitle',
+
+    // Beta features
+    'getThreadHistoryGraphQL',
+    'getThreadInfoGraphQL',
   ];
 
-  var defaultFuncs = utils.makeDefaults(html, userID);
+  var defaultFuncs = utils.makeDefaults(html, userID, ctx);
 
   // Load all api functions in a loop
   apiFuncNames.map(function(v) {
@@ -146,7 +165,7 @@ function makeLogin(jar, email, password, loginOptions, callback) {
     });
     // ---------- Very Hacky Part Ends -----------------
 
-    log.info("Logging in...");
+    log.info("login", "Logging in...");
     return utils
       .post("https://www.facebook.com/login.php?login_attempt=1&lwv=110", jar, form)
       .then(utils.saveCookies(jar))
@@ -158,6 +177,7 @@ function makeLogin(jar, email, password, loginOptions, callback) {
 
         // This means the account has login approvals turned on.
         if (headers.location.indexOf('https://www.facebook.com/checkpoint/') > -1) {
+          log.info("login", "You have login approvals turned on.");
           var nextURL = 'https://www.facebook.com/checkpoint/?next=https%3A%2F%2Fwww.facebook.com%2Fhome.php';
 
           return utils
@@ -177,8 +197,7 @@ function makeLogin(jar, email, password, loginOptions, callback) {
               });
 
               var form = utils.arrToForm(arr);
-              if (html.indexOf("Enter Security Code to Continue") > -1 ||
-                  html.indexOf("Enter Your Login Code") > -1) {
+              if (html.indexOf("checkpoint/?next") > -1) {
                 throw {
                   error: 'login-approval',
                   continue: function(code) {
@@ -308,13 +327,13 @@ function loginHelper(appState, email, password, globalOptions, callback) {
       var form = {
         reason: 6
       };
-      log.info('Request to reconnect');
+      log.info("login", 'Request to reconnect');
       return defaultFuncs
         .get("https://www.facebook.com/ajax/presence/reconnect.php", ctx.jar, form)
         .then(utils.saveCookies(ctx.jar));
     })
     .then(function(res) {
-      log.info('Request to pull 1');
+      log.info("login", 'Request to pull 1');
       var form = {
         channel : 'p_' + ctx.userID,
         seq : 0,
@@ -366,7 +385,7 @@ function loginHelper(appState, email, password, globalOptions, callback) {
         sticky_pool: resData.lb_info.pool,
       };
 
-      log.info("Request to pull 2");
+      log.info("login", "Request to pull 2");
       return utils
         .get("https://0-edge-chat.facebook.com/pull", ctx.jar, form)
         .then(utils.saveCookies(ctx.jar));
@@ -377,7 +396,7 @@ function loginHelper(appState, email, password, globalOptions, callback) {
         'folders[0]': 'inbox',
         'last_action_timestamp' : '0'
       };
-      log.info("Request to thread_sync");
+      log.info("login", "Request to thread_sync");
 
       return defaultFuncs
         .post("https://www.facebook.com/ajax/mercury/thread_sync.php", ctx.jar, form)
@@ -403,17 +422,17 @@ function loginHelper(appState, email, password, globalOptions, callback) {
   // At the end we call the callback or catch an exception
   mainPromise
     .then(function() {
-      log.info('Done logging in.');
+      log.info("login", 'Done logging in.');
       return callback(null, api);
     })
     .catch(function(e) {
-      log.error("Error in login:", e.error || e);
+      log.error("login", e.error || e);
       callback(e);
     });
 }
 
 function login(loginData, options, callback) {
-  if(utils.getType(options) === 'Function') {
+  if(utils.getType(options) === 'Function' || utils.getType(options) === 'AsyncFunction') {
     callback = options;
     options = {};
   }
@@ -423,6 +442,7 @@ function login(loginData, options, callback) {
     listenEvents: false,
     updatePresence: false,
     forceLogin: false,
+    logRecordSize: defaultLogRecordSize
   };
 
   setOptions(globalOptions, options);
